@@ -15,45 +15,37 @@ export default function CameraApp() {
   // State
   const [isLoading, setIsLoading] = useState(true);
   const [permissionDenied, setPermissionDenied] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [statusText, setStatusText] = useState('Ready');
-  const [currentStep, setCurrentStep] = useState(0);
-  const [overlaysActive, setOverlaysActive] = useState(false);
+  const [statusText, setStatusText] = useState('Listening...');
   const [instruction, setInstruction] = useState('');
   const [showInstruction, setShowInstruction] = useState(false);
   const [detections, setDetections] = useState<any[]>([]);
   const [manualUploaded, setManualUploaded] = useState(false);
-  const [manualContent, setManualContent] = useState<string>('');
-  const [showManualPanel, setShowManualPanel] = useState(false);
+  const [showManualPanel, setShowManualPanel] = useState(true); // Show by default
   const [isProcessingManual, setIsProcessingManual] = useState(false);
-  const [detectionMode, setDetectionMode] = useState<'yolo' | 'manual'>('yolo');
-  const [isRealtimeActive, setIsRealtimeActive] = useState(false);
   const [fps, setFps] = useState(0);
+  
+  // Tutorial mode state
+  const [tutorialMode, setTutorialMode] = useState(false);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [steps, setSteps] = useState<any[]>([]);
+  const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+  const [showStepCard, setShowStepCard] = useState(false);
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
 
   useEffect(() => {
     drawOverlays();
   }, [detections]);
 
-  // Assembly steps
-  const assemblySteps = [
-    "Point your camera at the parts to begin",
-    "Insert the screw into the marked hole",
-    "Attach the left panel to the base",
-    "Secure with the remaining screws",
-    "Assembly complete! Great job!"
-  ];
-
-  // Initialize camera
+  // Initialize camera and start everything automatically
   useEffect(() => {
     initCamera();
     setupVoiceRecognition();
 
     return () => {
-      // Cleanup
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
-      if (recognitionRef.current && isListening) {
+      if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
       if (animationFrameRef.current) {
@@ -73,22 +65,18 @@ export default function CameraApp() {
         canvasRef.current.height = window.innerHeight;
       }
     };
-
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
-
     return () => window.removeEventListener('resize', resizeCanvas);
   }, []);
 
-  // Animation loop for drawing
+  // Animation loop
   useEffect(() => {
     const animate = () => {
       drawOverlays();
       animationFrameRef.current = requestAnimationFrame(animate);
     };
-
     animate();
-
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
@@ -96,20 +84,13 @@ export default function CameraApp() {
     };
   }, [detections]);
 
-  // Real-time detection loop
+  // Auto-start detection when manual is uploaded
   useEffect(() => {
-    if (isRealtimeActive) {
+    if (manualUploaded) {
       startRealtimeDetection();
-    } else {
-      stopRealtimeDetection();
     }
+  }, [manualUploaded]);
 
-    return () => {
-      stopRealtimeDetection();
-    };
-  }, [isRealtimeActive, detectionMode]);
-
-  // Initialize camera
   const initCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -128,8 +109,6 @@ export default function CameraApp() {
 
       setIsLoading(false);
       setPermissionDenied(false);
-      displayInstruction(assemblySteps[0], 3000);
-
     } catch (err) {
       console.error('Camera error:', err);
       setIsLoading(false);
@@ -137,7 +116,6 @@ export default function CameraApp() {
     }
   };
 
-  // Setup voice recognition
   const setupVoiceRecognition = () => {
     if (typeof window !== 'undefined') {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -157,62 +135,91 @@ export default function CameraApp() {
 
         recognition.onerror = (event: any) => {
           console.error('Speech recognition error:', event.error);
-          if (event.error === 'not-allowed') {
-            displayInstruction('Microphone access denied', 2000);
-          }
         };
 
         recognition.onend = () => {
-          if (isListening && recognitionRef.current) {
-            recognitionRef.current.start();
+          // Auto-restart recognition
+          if (recognitionRef.current && manualUploaded) {
+            setTimeout(() => {
+              try {
+                recognitionRef.current.start();
+              } catch (e) {
+                console.log('Recognition restart failed:', e);
+              }
+            }, 100);
           }
         };
 
         recognitionRef.current = recognition;
+        
+        // Don't start until manual is uploaded
       }
     }
   };
 
-  // Handle voice commands
-  const handleVoiceCommand = (command: string) => {
-    updateStatus(`Heard: "${command}"`);
+  const handleVoiceCommand = async (command: string) => {
+    updateStatus(`Processing: "${command}"`);
 
-    if (command.includes('start') || command.includes('begin')) {
-      setIsRealtimeActive(true);
-      displayInstruction("Real-time detection started", 2000);
-      speak("Starting real-time detection");
+    // Check for tutorial start command
+    if (command.includes('start') && (command.includes('tutorial') || command.includes('guide'))) {
+      startTutorial();
+      return;
     }
-    else if (command.includes('stop') || command.includes('pause')) {
-      setIsRealtimeActive(false);
-      displayInstruction("Real-time detection stopped", 2000);
-      speak("Stopping real-time detection");
-    }
-    else if (command.includes('next')) {
-      const nextStep = Math.min(currentStep + 1, assemblySteps.length - 1);
-      setCurrentStep(nextStep);
-      displayInstruction(assemblySteps[nextStep], 4000);
-      speak(assemblySteps[nextStep]);
-    }
-    else if (command.includes('repeat')) {
-      displayInstruction(assemblySteps[currentStep], 4000);
-      speak(assemblySteps[currentStep]);
-    }
-    else if (command.includes('help')) {
-      displayInstruction("Say 'start', 'stop', 'next', or 'repeat'", 3000);
-      speak("Available commands: start, stop, next, or repeat");
-    }
-    else if (command.includes('manual') || command.includes('upload')) {
-      setShowManualPanel(true);
-      speak("Manual upload panel opened");
-    }
-    else {
-      displayInstruction(`Command not recognized: "${command}"`, 2000);
+
+    // Route everything else to LLM assistant
+    if (manualUploaded) {
+      await askAssistant(command);
     }
   };
 
-  // Text-to-speech
+  const startTutorial = () => {
+    if (steps.length === 0) {
+      speak("Please upload a manual first to start the tutorial.");
+      return;
+    }
+
+    setTutorialMode(true);
+    setCurrentStepIndex(0);
+    setCompletedSteps([]);
+    setShowStepCard(true);
+    
+    const firstStep = steps[0];
+    speak(`Starting tutorial! Step 1: ${firstStep.instruction}`);
+    displayInstruction(`Step 1: ${firstStep.instruction}`, 8000);
+  };
+
+  const completeCurrentStep = () => {
+    const currentStep = currentStepIndex + 1;
+    
+    // Mark step as complete
+    setCompletedSteps(prev => [...prev, currentStep]);
+    
+    // Celebrate completion
+    speak(`Great job! Step ${currentStep} completed!`);
+    displayInstruction(`✅ Step ${currentStep} Complete!`, 3000);
+    
+    // Move to next step after delay
+    setTimeout(() => {
+      if (currentStepIndex < steps.length - 1) {
+        const nextIndex = currentStepIndex + 1;
+        setCurrentStepIndex(nextIndex);
+        const nextStep = steps[nextIndex];
+        setShowStepCard(true);
+        speak(`Next step: ${nextStep.instruction}`);
+        displayInstruction(`Step ${nextIndex + 1}: ${nextStep.instruction}`, 8000);
+      } else {
+        // Tutorial complete
+        speak("Congratulations! You've completed all steps. Assembly finished!");
+        displayInstruction("🎉 Tutorial Complete!", 5000);
+        setTutorialMode(false);
+        setShowStepCard(false);
+      }
+    }, 2000);
+  };
+
   const speak = (text: string) => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      speechSynthesis.cancel(); // Cancel any ongoing speech
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 0.9;
       utterance.pitch = 1.0;
@@ -221,35 +228,12 @@ export default function CameraApp() {
     }
   };
 
-  // Toggle voice listening
-  const toggleVoice = () => {
-    if (!recognitionRef.current) {
-      displayInstruction('Voice recognition not supported', 2000);
-      return;
-    }
-
-    if (isListening) {
-      recognitionRef.current.stop();
-      setIsListening(false);
-      updateStatus('Ready');
-    } else {
-      recognitionRef.current.start();
-      setIsListening(true);
-      updateStatus('Listening...');
-    }
-  };
-
-  // Start real-time detection
   const startRealtimeDetection = () => {
-    // Clear any existing interval
     if (detectionIntervalRef.current) {
       clearInterval(detectionIntervalRef.current);
     }
 
-    // Start new detection loop (adjust interval for performance)
-    // 1000ms = 1 FPS, 500ms = 2 FPS, 333ms = 3 FPS
-    const detectionIntervalMs = 1000; // Start with 1 FPS for stability
-    
+    const detectionIntervalMs = 1000;
     let lastDetectionTime = Date.now();
     
     detectionIntervalRef.current = setInterval(async () => {
@@ -261,35 +245,13 @@ export default function CameraApp() {
       await sendFrameToBackend();
     }, detectionIntervalMs);
 
-    updateStatus('Real-time detection active');
-    displayInstruction('Scanning continuously...', 2000);
+    updateStatus('Live & Listening');
   };
 
-  // Stop real-time detection
-  const stopRealtimeDetection = () => {
-    if (detectionIntervalRef.current) {
-      clearInterval(detectionIntervalRef.current);
-      detectionIntervalRef.current = null;
-    }
-    setFps(0);
-    updateStatus('Ready');
-  };
-
-  // Toggle real-time detection
-  const toggleRealtimeDetection = () => {
-    setIsRealtimeActive(!isRealtimeActive);
-    if (!isRealtimeActive) {
-      speak("Starting continuous detection");
-    } else {
-      speak("Stopping continuous detection");
-    }
-  };
-
-  // Handle PDF upload
   const handlePDFUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || file.type !== 'application/pdf') {
-      displayInstruction('Please upload a PDF file', 2000);
+      speak('Please upload a PDF file');
       return;
     }
 
@@ -298,10 +260,6 @@ export default function CameraApp() {
 
     try {
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
-      if (!backendUrl) {
-        throw new Error('Backend URL not configured');
-      }
-
       const formData = new FormData();
       formData.append('file', file);
 
@@ -314,25 +272,28 @@ export default function CameraApp() {
       
       if (data.success) {
         setManualUploaded(true);
-        setManualContent(data.content || 'Manual uploaded successfully');
-        setDetectionMode('manual');
-        displayInstruction('Manual processed! Now detecting based on manual', 3000);
-        speak('Manual uploaded successfully. I will now guide you based on the manual instructions.');
+        setSteps(data.steps || []);
         setShowManualPanel(false);
+        
+        speak(`Manual uploaded successfully. Found ${data.parts_count} parts and ${data.steps_count} steps. I'm ready to help! Say "start tutorial" to begin step-by-step guidance.`);
+        displayInstruction('Manual loaded! Say "Start tutorial" or ask me anything', 5000);
+        
+        // Start voice recognition now
+        if (recognitionRef.current) {
+          recognitionRef.current.start();
+        }
       } else {
         throw new Error(data.error || 'Failed to process manual');
       }
-
     } catch (error) {
       console.error('Manual upload error:', error);
-      displayInstruction('Failed to upload manual', 2000);
+      speak('Failed to upload manual');
     } finally {
       setIsProcessingManual(false);
-      updateStatus('Ready');
+      updateStatus('Live & Listening');
     }
   };
 
-  // Send frame to backend (with manual context if available)
   const sendFrameToBackend = async () => {
     if (!videoRef.current || !videoRef.current.readyState || videoRef.current.readyState < 2) {
       return;
@@ -346,13 +307,10 @@ export default function CameraApp() {
     if (!ctx) return;
 
     ctx.drawImage(videoRef.current, 0, 0);
-
-    const imageData = canvas.toDataURL("image/jpeg", 0.8); // Reduce quality for speed
+    const imageData = canvas.toDataURL("image/jpeg", 0.7);
 
     try {
-      const endpoint = detectionMode === 'manual' ? '/detect-with-manual' : '/detect';
-      
-      const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}${endpoint}`, {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/detect-with-manual`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: imageData }),
@@ -362,34 +320,77 @@ export default function CameraApp() {
       
       if (data.detections) {
         setDetections(data.detections);
-        
-        // Only show instruction if not in continuous mode or if it's important
-        if (!isRealtimeActive && data.instruction) {
-          displayInstruction(data.instruction, 5000);
-          speak(data.instruction);
+      }
+    } catch (error) {
+      console.error('Detection error:', error);
+    }
+  };
+
+  const askAssistant = async (question: string) => {
+    setIsProcessingVoice(true);
+
+    try {
+      // Get current frame
+      let frameData = null;
+      if (videoRef.current && videoRef.current.readyState >= 2) {
+        const canvas = document.createElement("canvas");
+        canvas.width = videoRef.current.videoWidth;
+        canvas.height = videoRef.current.videoHeight;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(videoRef.current, 0, 0);
+          frameData = canvas.toDataURL("image/jpeg", 0.6);
         }
       }
 
-    } catch (error) {
-      console.error('Detection error:', error);
-      if (!isRealtimeActive) {
-        displayInstruction('Detection failed. Check backend connection.', 2000);
+      const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/ask-assistant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: question,
+          current_step: currentStepIndex,
+          detections: detections,
+          frame: frameData,
+          conversation_history: []
+        })
+      });
+
+      const data = await response.json();
+      
+      if (data.answer) {
+        speak(data.answer);
+        
+        if (data.step_instruction) {
+          displayInstruction(data.step_instruction, 5000);
+        }
+        
+        if (data.highlight_objects && data.highlight_objects.length > 0) {
+          highlightObjectsInView(data.highlight_objects);
+        }
       }
+    } catch (error) {
+      console.error('Assistant error:', error);
+      speak('Sorry, I encountered an error. Please try again.');
+    } finally {
+      setIsProcessingVoice(false);
+      updateStatus('Live & Listening');
     }
   };
 
-  // Toggle overlays
-  const toggleOverlays = () => {
-    setOverlaysActive(!overlaysActive);
-    if (!overlaysActive) {
-      displayInstruction("Test mode: Showing sample overlays", 2000);
-    }
+  const highlightObjectsInView = (objectLabels: string[]) => {
+    setDetections(prev => prev.map(det => ({
+      ...det,
+      highlight: objectLabels.some(label => 
+        det.label.toLowerCase().includes(label.toLowerCase())
+      ),
+      color: objectLabels.some(label => 
+        det.label.toLowerCase().includes(label.toLowerCase())
+      ) ? '#f59e0b' : det.color
+    })));
   };
 
-  // Draw overlays on canvas
   const drawOverlays = () => {
     if (!canvasRef.current || detections.length === 0) {
-      // Clear canvas if no detections
       if (canvasRef.current) {
         const ctx = canvasRef.current.getContext("2d");
         if (ctx) {
@@ -409,63 +410,51 @@ export default function CameraApp() {
     const height = canvas.height;
 
     detections.forEach((det) => {
-      // Scale from backend resolution (assuming 1280x720)
       const x = (det.x / 1280) * width;
       const y = (det.y / 720) * height;
       const w = (det.width / 1280) * width;
       const h = (det.height / 720) * height;
 
-      // Draw bounding box
       ctx.strokeStyle = det.color || "#22c55e";
-      ctx.lineWidth = 4;
+      ctx.lineWidth = det.highlight ? 6 : 4;
       ctx.strokeRect(x, y, w, h);
 
-      // Draw label background
       ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
       const textMetrics = ctx.measureText(det.label);
       ctx.fillRect(x, y - 30, textMetrics.width + 20, 30);
 
-      // Draw label text
       ctx.fillStyle = det.color || "#22c55e";
       ctx.font = "bold 18px Arial";
       ctx.fillText(det.label, x + 10, y - 8);
 
-      // Draw confidence if available
-      if (det.confidence) {
-        ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
-        ctx.font = "12px Arial";
-        ctx.fillText(`${Math.round(det.confidence * 100)}%`, x + 10, y + 20);
-      }
-
-      // Draw pulsing circle for important items
       if (det.highlight) {
         const centerX = x + w / 2;
         const centerY = y + h / 2;
         const time = Date.now() / 1000;
-        const radius = 30 + Math.sin(time * 2) * 10;
+        const radius = 40 + Math.sin(time * 3) * 15;
 
         ctx.beginPath();
         ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = det.color || "#06b6d4";
-        ctx.lineWidth = 3;
-        ctx.globalAlpha = 0.8 - Math.abs(Math.sin(time * 2)) * 0.4;
+        ctx.strokeStyle = det.color || "#f59e0b";
+        ctx.lineWidth = 4;
+        ctx.globalAlpha = 0.9 - Math.abs(Math.sin(time * 3)) * 0.5;
         ctx.stroke();
         ctx.globalAlpha = 1;
       }
     });
   };
 
-  // Display instruction
   const displayInstruction = (text: string, duration: number) => {
     setInstruction(text);
     setShowInstruction(true);
     setTimeout(() => setShowInstruction(false), duration);
   };
 
-  // Update status
   const updateStatus = (text: string) => {
     setStatusText(text);
   };
+
+  const progressPercentage = steps.length > 0 ? (completedSteps.length / steps.length) * 100 : 0;
 
   return (
     <div className="relative w-full h-screen overflow-hidden bg-black">
@@ -485,8 +474,7 @@ export default function CameraApp() {
           <div className="text-6xl mb-5">📷</div>
           <h1 className="text-2xl font-bold mb-3">Camera Access Required</h1>
           <p className="text-base text-white/70 leading-relaxed mb-8">
-            AI needs camera access to guide you through assembly tasks. 
-            Please allow camera permissions and try again.
+            AI needs camera access to guide you through assembly.
           </p>
           <button 
             onClick={initCamera}
@@ -499,21 +487,17 @@ export default function CameraApp() {
 
       {/* Manual Upload Panel */}
       {showManualPanel && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-sm">
-          <div className="bg-gradient-to-br from-zinc-900 to-black border-2 border-white/20 rounded-3xl p-8 max-w-md w-full mx-6">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-bold">Upload Assembly Manual</h2>
-              <button 
-                onClick={() => setShowManualPanel(false)}
-                className="text-3xl text-white/60 hover:text-white"
-              >
-                ×
-              </button>
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/90 backdrop-blur-sm">
+          <div className="bg-gradient-to-br from-zinc-900 to-black border-2 border-cyan-400/30 rounded-3xl p-8 max-w-md w-full mx-6">
+            <div className="text-center mb-6">
+              <div className="w-16 h-16 bg-gradient-to-br from-cyan-400 to-purple-500 rounded-2xl flex items-center justify-center text-3xl font-black mb-4 mx-auto">
+                📖
+              </div>
+              <h2 className="text-2xl font-bold mb-2">Upload Your Manual</h2>
+              <p className="text-white/60 text-sm">
+                Upload your assembly manual to get started with AI-powered guidance
+              </p>
             </div>
-
-            <p className="text-white/70 mb-6 leading-relaxed">
-              Upload your assembly manual PDF. The AI will analyze it and provide context-aware guidance based on the instructions.
-            </p>
 
             <input
               ref={fileInputRef}
@@ -526,22 +510,16 @@ export default function CameraApp() {
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isProcessingManual}
-              className="w-full py-4 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-xl font-bold text-lg hover:scale-105 transition-transform disabled:opacity-50 disabled:cursor-not-allowed mb-4"
+              className="w-full py-4 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-xl font-bold text-lg hover:scale-105 transition-transform disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isProcessingManual ? '⏳ Processing...' : '📄 Choose PDF Manual'}
             </button>
 
-            {manualUploaded && (
-              <div className="bg-green-500/20 border border-green-500/50 rounded-xl p-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-2xl">✅</span>
-                  <div>
-                    <div className="font-bold text-green-400">Manual Uploaded</div>
-                    <div className="text-sm text-white/70">AI guidance is now manual-aware</div>
-                  </div>
-                </div>
-              </div>
-            )}
+            <div className="mt-6 text-xs text-white/50 text-center">
+              <p>✓ Real-time object detection</p>
+              <p>✓ Voice-activated assistant</p>
+              <p>✓ Step-by-step tutorial mode</p>
+            </div>
           </div>
         </div>
       )}
@@ -563,120 +541,117 @@ export default function CameraApp() {
         className="absolute inset-0 pointer-events-none"
       />
 
-      {/* Top Bar */}
+      {/* Top Status Bar */}
       <div className="absolute top-0 left-0 right-0 p-5 bg-gradient-to-b from-black/80 to-transparent z-10">
         <div className="flex justify-between items-center">
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-2 bg-white/10 backdrop-blur-md px-4 py-2 rounded-full">
-              <div className={`w-2 h-2 rounded-full ${isRealtimeActive ? 'bg-red-500' : isListening ? 'bg-yellow-400' : 'bg-green-400'} animate-pulse`} />
+              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
               <span className="text-sm font-semibold">{statusText}</span>
             </div>
-            {isRealtimeActive && fps > 0 && (
+            {fps > 0 && (
               <div className="bg-red-500/30 backdrop-blur-md px-3 py-1.5 rounded-full border border-red-400/50">
                 <span className="text-xs font-semibold">🔴 LIVE • {fps} FPS</span>
               </div>
             )}
-            {manualUploaded && (
-              <div className="bg-purple-500/30 backdrop-blur-md px-3 py-1.5 rounded-full border border-purple-400/50">
-                <span className="text-xs font-semibold">📖 Manual Mode</span>
+            {isProcessingVoice && (
+              <div className="bg-blue-500/30 backdrop-blur-md px-3 py-1.5 rounded-full border border-blue-400/50">
+                <span className="text-xs font-semibold">🤖 Thinking...</span>
               </div>
             )}
           </div>
-          <button 
-            onClick={() => setShowManualPanel(true)}
-            className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center text-xl hover:bg-white/20 transition-colors"
-          >
-            📄
-          </button>
+          {manualUploaded && (
+            <div className="bg-purple-500/30 backdrop-blur-md px-4 py-2 rounded-full border border-purple-400/50">
+              <span className="text-xs font-semibold">📖 Manual Loaded</span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Detection Panel */}
-      <div className="absolute top-20 left-5 bg-black/80 backdrop-blur-xl p-4 rounded-2xl border border-white/10 max-w-[200px] z-10">
-        <div className="text-xs text-cyan-400 font-bold mb-2 uppercase tracking-wide">Detected</div>
-        {detections.length === 0 ? (
-          <div className="text-sm text-white/50 italic">No objects yet</div>
-        ) : (
-          detections.slice(0, 5).map((det, i) => (
-            <div key={i} className="flex justify-between text-sm text-white my-1.5">
-              <span className="truncate mr-2">{det.label}</span>
-              {det.confidence && (
-                <span className="text-green-400 font-semibold whitespace-nowrap">{Math.round(det.confidence * 100)}%</span>
-              )}
+      {/* Progress Bar (Tutorial Mode) */}
+      {tutorialMode && (
+        <div className="absolute top-20 left-5 right-5 z-10">
+          <div className="bg-black/80 backdrop-blur-xl rounded-2xl border border-white/10 p-4">
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-sm font-bold text-cyan-400">Tutorial Progress</span>
+              <span className="text-sm text-white/70">
+                {completedSteps.length} / {steps.length} steps
+              </span>
             </div>
-          ))
-        )}
-        {detections.length > 5 && (
-          <div className="text-xs text-white/50 mt-2">+{detections.length - 5} more</div>
-        )}
-      </div>
+            <div className="w-full h-3 bg-white/10 rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-gradient-to-r from-cyan-500 to-purple-500 transition-all duration-500 ease-out"
+                style={{ width: `${progressPercentage}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
-      {/* Instruction Box */}
+      {/* Current Step Card (Tutorial Mode) */}
+      {tutorialMode && showStepCard && currentStepIndex < steps.length && (
+        <div className="absolute bottom-24 left-5 right-5 z-10">
+          <div className="bg-gradient-to-br from-zinc-900/95 to-black/95 backdrop-blur-xl rounded-2xl border-2 border-cyan-400/30 p-6">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <div className="text-cyan-400 text-xs font-bold uppercase tracking-wide mb-1">
+                  Step {currentStepIndex + 1} of {steps.length}
+                </div>
+                <h3 className="text-lg font-bold text-white leading-relaxed">
+                  {steps[currentStepIndex].instruction}
+                </h3>
+              </div>
+            </div>
+            
+            <button
+              onClick={completeCurrentStep}
+              className="w-full py-3 bg-gradient-to-r from-green-500 to-emerald-500 rounded-xl font-bold text-white hover:scale-105 transition-transform active:scale-95"
+            >
+              ✓ Mark as Complete
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Instruction Overlay */}
       <div 
         className={`absolute top-1/2 left-5 right-5 -translate-y-1/2 bg-gradient-to-r from-cyan-500/95 to-purple-500/95 backdrop-blur-xl p-6 rounded-2xl border-2 border-white/30 text-center z-10 transition-opacity duration-300 ${showInstruction ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
       >
         <p className="text-lg font-bold text-white leading-relaxed">
-          &ldquo;{instruction}&rdquo;
+          {instruction}
         </p>
       </div>
 
-      {/* Bottom Controls */}
-      <div className="absolute bottom-0 left-0 right-0 p-8 pb-10 bg-gradient-to-t from-black/90 to-transparent z-10">
-        {/* Control Buttons */}
-        <div className="flex justify-center gap-4 mb-5">
-          <button
-            onClick={toggleVoice}
-            className={`flex-1 max-w-[120px] p-4 rounded-2xl border-2 backdrop-blur-md transition-all ${
-              isListening 
-                ? 'bg-yellow-500/50 border-yellow-500/80' 
-                : 'bg-white/10 border-white/20 active:scale-95'
-            }`}
-          >
-            <div className="text-2xl mb-1.5">🎤</div>
-            <div className="text-sm font-semibold">Voice</div>
-          </button>
+      {/* Detection Panel */}
+      <div className="absolute top-40 left-5 bg-black/80 backdrop-blur-xl p-4 rounded-2xl border border-white/10 max-w-[200px] z-10">
+        <div className="text-xs text-cyan-400 font-bold mb-2 uppercase tracking-wide">Detected</div>
+        {detections.length === 0 ? (
+          <div className="text-sm text-white/50 italic">Scanning...</div>
+        ) : (
+          detections.slice(0, 5).map((det, i) => (
+            <div key={i} className={`flex justify-between text-sm my-1.5 ${det.highlight ? 'text-yellow-400 font-bold' : 'text-white'}`}>
+              <span className="truncate mr-2">{det.label}</span>
+              {det.confidence && (
+                <span className="text-green-400 font-semibold whitespace-nowrap text-xs">
+                  {Math.round(det.confidence * 100)}%
+                </span>
+              )}
+            </div>
+          ))
+        )}
+      </div>
 
-          <button
-            onClick={toggleRealtimeDetection}
-            className={`flex-1 max-w-[120px] p-4 rounded-2xl border-2 backdrop-blur-md transition-all ${
-              isRealtimeActive 
-                ? 'bg-red-500/50 border-red-500/80 animate-pulse' 
-                : 'bg-white/10 border-white/20 active:scale-95'
-            }`}
-          >
-            <div className="text-2xl mb-1.5">{isRealtimeActive ? '⏸️' : '▶️'}</div>
-            <div className="text-sm font-semibold">{isRealtimeActive ? 'Stop' : 'Live'}</div>
-          </button>
-
-          <button
-            onClick={sendFrameToBackend}
-            disabled={isRealtimeActive}
-            className="flex-1 max-w-[120px] p-4 bg-white/10 backdrop-blur-md border-2 border-white/20 rounded-2xl active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <div className="text-2xl mb-1.5">📸</div>
-            <div className="text-sm font-semibold">Scan</div>
-          </button>
-        </div>
-
-        {/* Voice Commands List */}
-        <div className="bg-white/5 backdrop-blur-md rounded-xl p-3 text-xs text-white/70">
-          <div className="font-bold mb-2 text-purple-400">Voice Commands:</div>
-          <div className="grid grid-cols-2 gap-1">
-            <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;start&quot; - Begin live
-            </div>
-            <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;stop&quot; - Pause live
-            </div>
-            <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;next&quot; - Next step
-            </div>
-            <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;manual&quot; - Upload PDF
-            </div>
+      {/* Voice Indicator */}
+      {manualUploaded && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10">
+          <div className="bg-black/80 backdrop-blur-xl rounded-full px-6 py-3 border border-cyan-400/30 flex items-center gap-3">
+            <div className="w-3 h-3 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-sm font-semibold text-white">
+              🎤 Speak to ask questions
+            </span>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

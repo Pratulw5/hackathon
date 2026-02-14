@@ -15,7 +15,7 @@ import json
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import time
-from functools import lru_cache
+from typing import Optional, List
 
 load_dotenv()
 
@@ -26,13 +26,14 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000", 
         "https://ai-vision-guide.vercel.app",
+        "*"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load YOLO model once at startup
+# Load YOLO model
 print("Loading YOLO model...")
 yolo_model = YOLO("yolov8s.pt")
 print("✓ YOLO model loaded")
@@ -40,17 +41,18 @@ print("✓ YOLO model loaded")
 # API configuration
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"
 
 # Global state
 manual_context = {
     "text": "",
+    "full_manual_text": "",  # Complete manual for LLM
     "parts_list": [],
     "steps": [],
     "current_step": 0,
     "images": []
 }
 
-# Performance tracking
 detection_stats = {
     "total_requests": 0,
     "avg_response_time": 0,
@@ -60,21 +62,24 @@ detection_stats = {
 class ImageData(BaseModel):
     image: str
 
-# Optimized YOLO detection with caching
+class AssistantQuery(BaseModel):
+    question: str
+    current_step: int
+    detections: List[dict] = []
+    frame: Optional[str] = None
+    conversation_history: List[str] = []
+
 @app.post("/detect")
 def detect(data: ImageData):
-    """Optimized YOLO detection for real-time video"""
+    """Optimized YOLO detection"""
     start_time = time.time()
     
     try:
-        # Decode base64 image
         img_data = data.image.split(",")[1] if "," in data.image else data.image
         img_bytes = base64.b64decode(img_data)
         np_arr = np.frombuffer(img_bytes, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         
-        # Resize for faster processing (optional - adjust based on accuracy needs)
-        # Smaller size = faster, but less accurate
         height, width = frame.shape[:2]
         if width > 1280:
             scale = 1280 / width
@@ -82,13 +87,12 @@ def detect(data: ImageData):
             new_height = int(height * scale)
             frame = cv2.resize(frame, (new_width, new_height))
         
-        # Run YOLO detection with optimized settings
         results = yolo_model(
             frame,
-            conf=0.25,  # Lower confidence threshold
-            iou=0.45,   # NMS IOU threshold
-            max_det=10,  # Limit max detections for speed
-            verbose=False  # Disable verbose output
+            conf=0.25,
+            iou=0.45,
+            max_det=10,
+            verbose=False
         )
         
         detections = []
@@ -108,7 +112,6 @@ def detect(data: ImageData):
                     "color": "#22c55e"
                 })
         
-        # Update stats
         elapsed = time.time() - start_time
         detection_stats["total_requests"] += 1
         detection_stats["avg_response_time"] = (
@@ -129,11 +132,10 @@ def detect(data: ImageData):
 
 @app.post("/detect-with-manual")
 def detect_with_manual(data: ImageData):
-    """Manual-aware detection - optimized for real-time"""
+    """Manual-aware detection"""
     start_time = time.time()
     
     try:
-        # Get current step info
         current_step = manual_context.get("current_step", 0)
         steps = manual_context.get("steps", [])
         parts = manual_context.get("parts_list", [])
@@ -142,27 +144,22 @@ def detect_with_manual(data: ImageData):
         if steps and current_step < len(steps):
             current_instruction = steps[current_step]["instruction"]
         
-        # Run base YOLO detection (fast)
         yolo_result = detect(data)
         detections = yolo_result.get("detections", [])
         
-        # Filter/enhance detections based on manual context
         if parts and detections:
-            # Create a set of part keywords from manual
             part_keywords = set()
             for part in parts:
                 words = part['name'].lower().split()
                 part_keywords.update(words)
             
-            # Boost confidence for detected objects that match manual parts
             for det in detections:
                 label_lower = det['label'].lower()
                 if any(keyword in label_lower for keyword in part_keywords):
-                    det['color'] = "#a855f7"  # Purple for manual-relevant items
+                    det['color'] = "#a855f7"
                     det['highlight'] = True
-                    det['confidence'] = min(det['confidence'] + 0.2, 1.0)  # Boost confidence
+                    det['confidence'] = min(det['confidence'] + 0.2, 1.0)
         
-        # Generate instruction
         instruction = ""
         if current_instruction and detections:
             detected_labels = [d['label'] for d in detections[:3]]
@@ -186,25 +183,164 @@ def detect_with_manual(data: ImageData):
         
     except Exception as e:
         print(f"Manual detection error: {str(e)}")
-        return detect(data)  # Fallback to regular detection
+        return detect(data)
 
-# PDF Processing functions (unchanged but optimized)
+@app.post("/ask-assistant")
+async def ask_assistant(query: AssistantQuery):
+    """LLM-powered voice assistant with live object detection context"""
+    
+    if not GEMINI_API_KEY:
+        return {
+            "answer": "Sorry, AI assistant is not configured. Please set GEMINI_API_KEY.",
+            "highlight_objects": [],
+            "step_instruction": None
+        }
+    
+    try:
+        # Get manual context
+        manual_text = manual_context.get("full_manual_text", "")
+        parts_list = manual_context.get("parts_list", [])
+        steps = manual_context.get("steps", [])
+        current_step = query.current_step
+        
+        # Build context
+        current_step_info = ""
+        if steps and current_step < len(steps):
+            current_step_info = f"Current Step {current_step + 1}: {steps[current_step]['instruction']}"
+        
+        parts_context = ""
+        if parts_list:
+            parts_context = "Parts List:\n"
+            for part in parts_list[:15]:
+                parts_context += f"- {part['name']} (ID: {part['id']}, Qty: {part['quantity']})\n"
+        
+        steps_context = ""
+        if steps:
+            steps_context = "Assembly Steps:\n"
+            for i, step in enumerate(steps[:10], 1):
+                prefix = "→ " if i == current_step + 1 else "  "
+                steps_context += f"{prefix}Step {step['number']}: {step['instruction']}\n"
+        
+        # Live detection context
+        detection_context = ""
+        if query.detections:
+            detected_objects = [d['label'] for d in query.detections]
+            detection_context = f"\nCurrently visible in camera: {', '.join(detected_objects)}"
+        
+        # Create prompt
+        prompt = f"""You are an expert AI assembly assistant with LIVE camera vision. You can see what the user is looking at in real-time through object detection.
+
+MANUAL CONTEXT:
+{parts_context}
+
+{steps_context}
+
+{current_step_info}
+
+{detection_context}
+
+FULL MANUAL (for detailed reference):
+{manual_text[:6000]}
+
+USER QUESTION/COMMAND: {query.question}
+
+YOUR TASK:
+1. Answer questions clearly based on the manual and what you see in the camera
+2. Reference specific parts by ID when relevant
+3. If they ask "where is X", check if X is in the detected objects and guide them
+4. If they're stuck, break down the step into smaller actions
+5. Be encouraging and supportive - assembly can be challenging!
+6. If they say "start tutorial", explain they should use the app's tutorial mode
+7. Keep answers conversational and under 100 words
+
+RESPONSE FORMAT (JSON):
+{{
+  "answer": "Your helpful spoken response (2-3 sentences, natural language)",
+  "highlight_objects": ["list", "of", "object", "labels", "from", "camera", "to", "highlight"],
+  "step_instruction": "Optional: brief overlay text (1 sentence, only if giving specific action)"
+}}
+
+IMPORTANT:
+- Keep answer BRIEF for voice output (under 100 words)
+- Use simple, clear language - you're speaking to them
+- Only include objects in highlight_objects that are ACTUALLY in the detected objects list
+- step_instruction should be SHORT (under 10 words) as it's displayed as overlay
+- Be conversational - you're their helpful guide, not a robot
+
+Respond with ONLY the JSON, no other text."""
+
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.4,
+                "maxOutputTokens": 512
+            }
+        }
+        
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            if 'candidates' in result and len(result['candidates']) > 0:
+                generated_text = result['candidates'][0]['content']['parts'][0]['text']
+                generated_text = generated_text.replace('```json', '').replace('```', '').strip()
+                
+                try:
+                    parsed_response = json.loads(generated_text)
+                    
+                    return {
+                        "answer": parsed_response.get("answer", "I couldn't find that information."),
+                        "highlight_objects": parsed_response.get("highlight_objects", []),
+                        "step_instruction": parsed_response.get("step_instruction", None)
+                    }
+                except json.JSONDecodeError:
+                    return {
+                        "answer": generated_text[:300],
+                        "highlight_objects": [],
+                        "step_instruction": None
+                    }
+        else:
+            print(f"Gemini API Error: {response.status_code}")
+            return {
+                "answer": "Sorry, I'm having trouble connecting. Please try again.",
+                "highlight_objects": [],
+                "step_instruction": None
+            }
+            
+    except Exception as e:
+        print(f"Assistant error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            "answer": "I encountered an error. Please try rephrasing your question.",
+            "highlight_objects": [],
+            "step_instruction": None
+        }
+
 def extract_text_from_pdf(pdf_file):
-    """Extract text from PDF manual"""
+    """Extract text from PDF"""
     try:
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         text = ""
         for page_num, page in enumerate(pdf_reader.pages):
             page_text = page.extract_text()
             text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
-        print(f"Extracted {len(text)} characters from PDF")
+        print(f"Extracted {len(text)} characters")
         return text
     except Exception as e:
         print(f"Error extracting text: {str(e)}")
         return ""
 
 def extract_images_from_pdf(pdf_bytes):
-    """Extract images from PDF pages"""
+    """Extract images from PDF"""
     try:
         images = convert_from_bytes(pdf_bytes, dpi=150, fmt='jpeg')
         image_list = []
@@ -216,56 +352,37 @@ def extract_images_from_pdf(pdf_bytes):
                 'page': i + 1,
                 'data': f"data:image/jpeg;base64,{img_base64}"
             })
-        print(f"Extracted {len(image_list)} page images from PDF")
+        print(f"Extracted {len(image_list)} page images")
         return image_list
     except Exception as e:
         print(f"Error extracting images: {str(e)}")
         return []
 
 def parse_manual_with_gemini(text):
-    """Use Gemini AI to parse manual content"""
+    """Parse manual with Gemini AI"""
     if not GEMINI_API_KEY:
-        print("Warning: No GEMINI_API_KEY. Using basic parsing.")
         return parse_manual_basic(text)
     
     try:
-        prompt = f"""You are an expert at parsing assembly instruction manuals. Analyze this manual text and extract:
-
-1. PARTS LIST - All components, hardware, and tools needed
-2. ASSEMBLY STEPS - Step-by-step instructions in order
+        prompt = f"""Parse this assembly manual and extract parts and steps.
 
 Manual Text:
 {text[:8000]}
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON:
 {{
-  "parts": [
-    {{"id": "A", "name": "Long screw", "quantity": 4}},
-    {{"id": "B", "name": "Wooden panel", "quantity": 2}}
-  ],
-  "steps": [
-    {{"number": 1, "instruction": "Attach panel A to base using screws B"}},
-    {{"number": 2, "instruction": "Secure left side panel with brackets"}}
-  ]
-}}
-
-Rules:
-- Extract ALL parts mentioned
-- Number steps sequentially from 1
-- Keep instructions clear and concise
-- If no parts/steps found, return empty arrays"""
+  "parts": [{{"id": "A", "name": "Long screw", "quantity": 4}}],
+  "steps": [{{"number": 1, "instruction": "Attach panel A to base"}}]
+}}"""
 
         headers = {"Content-Type": "application/json"}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 2048
-            }
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
         }
         
         response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GEMINI_API_KEY}",
+            f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
             headers=headers,
             json=payload,
             timeout=30
@@ -283,8 +400,6 @@ Rules:
                 
                 print(f"Gemini parsed: {len(parts_list)} parts, {len(steps)} steps")
                 return parts_list, steps
-        else:
-            print(f"Gemini API Error: {response.status_code}")
             
     except Exception as e:
         print(f"Gemini parsing failed: {str(e)}")
@@ -292,7 +407,7 @@ Rules:
     return parse_manual_basic(text)
 
 def parse_manual_basic(text):
-    """Basic regex-based parsing fallback"""
+    """Basic fallback parsing"""
     parts_list = []
     steps = []
     
@@ -340,7 +455,6 @@ def parse_manual_basic(text):
                     "instruction": instruction[:250]
                 })
     
-    # Remove duplicates
     parts_list = list({p['name']: p for p in parts_list}.values())
     steps = sorted(steps, key=lambda x: x['number'])
     
@@ -349,63 +463,52 @@ def parse_manual_basic(text):
 
 @app.post("/upload-manual")
 async def upload_manual(file: UploadFile = File(...)):
-    """Upload and process assembly manual PDF"""
+    """Upload and process manual"""
     try:
         print(f"\n{'='*60}")
-        print(f"Processing manual: {file.filename}")
+        print(f"Processing: {file.filename}")
         print(f"{'='*60}")
         
-        # Read PDF
         pdf_content = await file.read()
         pdf_file = BytesIO(pdf_content)
         
-        # Extract text
-        print("Extracting text from PDF...")
+        print("Extracting text...")
         text = extract_text_from_pdf(pdf_file)
-        print(f"First 500 chars: {text[:500]}\n")
         
-        # Extract images
-        print("Extracting page images...")
+        print("Extracting images...")
         pdf_file.seek(0)
         page_images = extract_images_from_pdf(pdf_content)
         
-        # Parse with AI
-        print("Parsing manual with AI...")
+        print("Parsing with AI...")
         parts_list, steps = parse_manual_with_gemini(text)
         
-        # Store in global context
-        manual_context["text"] = text
+        # Store full text for LLM
+        manual_context["text"] = text[:1000]
+        manual_context["full_manual_text"] = text
         manual_context["parts_list"] = parts_list
         manual_context["steps"] = steps
         manual_context["current_step"] = 0
         manual_context["images"] = page_images
         
         print(f"\n{'='*60}")
-        print(f"✓ Manual processed successfully!")
-        print(f"  Parts found: {len(parts_list)}")
-        print(f"  Steps found: {len(steps)}")
-        print(f"  Pages: {len(page_images)}")
+        print(f"✓ Success!")
+        print(f"  Parts: {len(parts_list)}")
+        print(f"  Steps: {len(steps)}")
+        print(f"  Text: {len(text)} chars")
         print(f"{'='*60}\n")
         
         return {
             "success": True,
-            "content": f"Manual uploaded: {len(parts_list)} parts, {len(steps)} steps",
+            "content": f"{len(parts_list)} parts, {len(steps)} steps",
             "parts_count": len(parts_list),
             "steps_count": len(steps),
             "parts": parts_list[:10],
-            "steps": steps[:5],
-            "first_step": steps[0] if steps else None,
-            "debug_info": {
-                "text_length": len(text),
-                "pages_analyzed": len(page_images),
-                "parsing_method": "gemini" if GEMINI_API_KEY else "basic"
-            }
+            "steps": steps,
+            "first_step": steps[0] if steps else None
         }
         
     except Exception as e:
-        print(f"\n{'='*60}")
-        print(f"✗ Error processing manual: {str(e)}")
-        print(f"{'='*60}\n")
+        print(f"Error: {str(e)}")
         import traceback
         traceback.print_exc()
         
@@ -416,115 +519,39 @@ async def upload_manual(file: UploadFile = File(...)):
             "steps_count": 0
         }
 
-@app.post("/next-step")
-def next_step():
-    """Move to next assembly step"""
-    steps = manual_context.get("steps", [])
-    current = manual_context.get("current_step", 0)
-    
-    if current < len(steps) - 1:
-        manual_context["current_step"] = current + 1
-        next_step_data = steps[current + 1]
-        
-        return {
-            "success": True,
-            "step": next_step_data,
-            "step_number": current + 1,
-            "total_steps": len(steps)
-        }
-    else:
-        return {
-            "success": False,
-            "message": "Already at final step"
-        }
-
-@app.post("/previous-step")
-def previous_step():
-    """Move to previous assembly step"""
-    current = manual_context.get("current_step", 0)
-    
-    if current > 0:
-        manual_context["current_step"] = current - 1
-        steps = manual_context.get("steps", [])
-        prev_step_data = steps[current - 1]
-        
-        return {
-            "success": True,
-            "step": prev_step_data,
-            "step_number": current - 1,
-            "total_steps": len(steps)
-        }
-    else:
-        return {
-            "success": False,
-            "message": "Already at first step"
-        }
-
-@app.get("/manual-info")
-def get_manual_info():
-    """Get current manual information"""
-    steps = manual_context.get("steps", [])
-    current_step_num = manual_context.get("current_step", 0)
-    
+@app.get("/health")
+def health_check():
     return {
-        "has_manual": bool(manual_context.get("text")),
-        "parts_count": len(manual_context.get("parts_list", [])),
-        "steps_count": len(steps),
-        "current_step": current_step_num,
-        "parts": manual_context.get("parts_list", [])[:10],
-        "current_step_info": steps[current_step_num] if steps and current_step_num < len(steps) else None,
-        "all_steps": steps
+        "status": "healthy",
+        "yolo_loaded": yolo_model is not None,
+        "llm_ready": bool(GEMINI_API_KEY),
+        "manual_loaded": bool(manual_context.get("full_manual_text"))
     }
 
 @app.get("/stats")
 def get_stats():
-    """Get performance statistics"""
     return {
         "total_detections": detection_stats["total_requests"],
         "avg_response_time_ms": int(detection_stats["avg_response_time"] * 1000),
-        "last_detection_time_ms": int(detection_stats["last_detection_time"] * 1000),
-        "manual_loaded": bool(manual_context.get("text")),
-        "current_step": manual_context.get("current_step", 0),
-        "total_steps": len(manual_context.get("steps", []))
+        "manual_loaded": bool(manual_context.get("full_manual_text")),
+        "steps_count": len(manual_context.get("steps", []))
     }
-
-@app.get("/api-status")
-def api_status():
-    """Check API configuration status"""
-    return {
-        "huggingface_configured": bool(HF_API_KEY),
-        "gemini_configured": bool(GEMINI_API_KEY),
-        "yolo_loaded": yolo_model is not None,
-        "manual_uploaded": bool(manual_context.get("text")),
-        "parsing_capabilities": {
-            "ai_parsing": bool(GEMINI_API_KEY),
-            "visual_analysis": bool(HF_API_KEY),
-            "basic_parsing": True
-        },
-        "performance": detection_stats
-    }
-
-@app.get("/health")
-def health_check():
-    """Simple health check endpoint"""
-    return {"status": "healthy", "model_loaded": yolo_model is not None}
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     
     print("\n" + "="*60)
-    print("Sophie Vision-Guide Backend - Real-Time Detection")
+    print("🤖 AI Vision Guide - Voice Assistant Edition")
     print("="*60)
-    print("API Configuration:")
-    print(f"  Hugging Face: {'✓' if HF_API_KEY else '✗'}")
-    print(f"  Gemini AI: {'✓' if GEMINI_API_KEY else '✗'}")
-    print(f"  YOLO: ✓ Loaded")
-    print("\nOptimizations:")
-    print("  • Fast YOLO inference")
-    print("  • Automatic frame resizing")
-    print("  • Low latency mode")
-    print("  • Manual context caching")
+    print("Features:")
+    print("  ✓ Real-time YOLO detection")
+    print(f"  {'✓' if GEMINI_API_KEY else '✗'} Voice Q&A with LLM")
+    print(f"  {'✓' if GEMINI_API_KEY else '✗'} Tutorial mode")
+    print("\nEndpoints:")
+    print("  • POST /detect-with-manual - Live detection")
+    print("  • POST /ask-assistant - Voice Q&A")
+    print("  • POST /upload-manual - Upload PDF")
     print("="*60 + "\n")
     
     uvicorn.run(app, host="0.0.0.0", port=port)
