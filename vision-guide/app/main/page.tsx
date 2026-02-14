@@ -6,6 +6,26 @@ export default function CameraApp() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [permissionDenied, setPermissionDenied] = useState(false);
+const [showManualPanel, setShowManualPanel] = useState(false);
+const [manualUploaded, setManualUploaded] = useState(false);
+const [isProcessingManual, setIsProcessingManual] = useState(false);
+const fileInputRef = useRef<HTMLInputElement>(null);
+
+const handlePDFUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const file = event.target.files?.[0];
+  if (!file || file.type !== 'application/pdf') return;
+
+  setIsProcessingManual(true);
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/upload-manual`, { method: 'POST', body: formData });
+    const data = await response.json();
+    if (data.success) setManualUploaded(true);
+  } finally {
+    setIsProcessingManual(false);
+  }
+};
 
   useEffect(() => {
     initCamera();
