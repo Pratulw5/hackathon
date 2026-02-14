@@ -54,7 +54,67 @@ const drawOverlays = () => {
     ctx.fillText(det.label, x + 5, y - 5);
   });
 };
+const [isListening, setIsListening] = useState(false);
+const recognitionRef = useRef<any>(null);
+const [currentStep, setCurrentStep] = useState(0);
+const [instruction, setInstruction] = useState('');
+const [showInstruction, setShowInstruction] = useState(false);
 
+const assemblySteps = [
+  "Point your camera at the parts to begin",
+  "Insert the screw into the marked hole",
+  "Attach the left panel to the base",
+  "Secure with the remaining screws",
+  "Assembly complete! Great job!"
+];
+
+const displayInstruction = (text: string, duration: number) => {
+  setInstruction(text);
+  setShowInstruction(true);
+  setTimeout(() => setShowInstruction(false), duration);
+};
+
+const handleVoiceCommand = (command: string) => {
+  if (command.includes('start')) {
+    setCurrentStep(1);
+    displayInstruction(assemblySteps[1], 4000);
+  } else if (command.includes('next')) {
+    const nextStep = Math.min(currentStep + 1, assemblySteps.length - 1);
+    setCurrentStep(nextStep);
+    displayInstruction(assemblySteps[nextStep], 4000);
+  }
+};
+
+useEffect(() => {
+  if (typeof window !== 'undefined') {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
+
+      recognition.onresult = (event: any) => {
+        const last = event.results.length - 1;
+        const command = event.results[last][0].transcript.toLowerCase().trim();
+        handleVoiceCommand(command);
+      };
+
+      recognitionRef.current = recognition;
+    }
+  }
+}, []);
+
+const toggleVoice = () => {
+  if (!recognitionRef.current) return;
+  if (isListening) {
+    recognitionRef.current.stop();
+    setIsListening(false);
+  } else {
+    recognitionRef.current.start();
+    setIsListening(true);
+  }
+};
 return (
   <>
     <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
