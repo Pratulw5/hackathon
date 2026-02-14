@@ -27,11 +27,39 @@ export default function CameraApp() {
     }
   };
 
-  return (
-    <div className="relative w-full h-screen bg-black">
-      {isLoading && <div className="absolute inset-0 flex items-center justify-center text-white">Initializing camera...</div>}
-      {permissionDenied && <div className="absolute inset-0 flex items-center justify-center text-white">Camera access denied</div>}
-      <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-    </div>
-  );
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+const [detections, setDetections] = useState<any[]>([]);
+
+useEffect(() => {
+  const animate = () => {
+    drawOverlays();
+    requestAnimationFrame(animate);
+  };
+  animate();
+}, [detections]);
+
+const drawOverlays = () => {
+  if (!canvasRef.current || detections.length === 0) return;
+  const ctx = canvasRef.current.getContext("2d");
+  if (!ctx) return;
+
+  ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+
+  detections.forEach(det => {
+    const x = det.x; const y = det.y; const w = det.width; const h = det.height;
+    ctx.strokeStyle = det.color || "#22c55e";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = "white";
+    ctx.fillText(det.label, x + 5, y - 5);
+  });
+};
+
+return (
+  <>
+    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+    <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />
+  </>
+);
+
 }
