@@ -1,18 +1,18 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
-
-# AI / Vision
 ultralytics==8.0.221
-torch==2.1.2
-torchvision==0.16.2
-
-Pillow>=10.0.0,<11
+Pillow==10.1.0
 opencv-python-headless==4.8.1.78
-numpy==1.24.4
+numpy==1.24.3
 
 # PDF Processing
 PyPDF2==3.0.1
+pdf2image==1.16.3
+poppler-utils  # Required for pdf2image
 
 # API Requests
 requests>=2.31.0
+
+# Environment variables
+python-dotenv>=1.0.0
