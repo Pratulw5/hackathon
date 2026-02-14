@@ -10,6 +10,7 @@ export default function CameraApp() {
   const recognitionRef = useRef<any>(null);
   const animationFrameRef = useRef<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // State
   const [isLoading, setIsLoading] = useState(true);
@@ -26,36 +27,12 @@ export default function CameraApp() {
   const [showManualPanel, setShowManualPanel] = useState(false);
   const [isProcessingManual, setIsProcessingManual] = useState(false);
   const [detectionMode, setDetectionMode] = useState<'yolo' | 'manual'>('yolo');
+  const [isRealtimeActive, setIsRealtimeActive] = useState(false);
+  const [fps, setFps] = useState(0);
 
   useEffect(() => {
     drawOverlays();
   }, [detections]);
-
-  // Test overlays data
-  const testOverlays = [
-    {
-      type: 'circle',
-      x: 0.3,
-      y: 0.4,
-      label: 'Insert screw here',
-      color: '#06b6d4'
-    },
-    {
-      type: 'circle',
-      x: 0.7,
-      y: 0.5,
-      label: 'Attach panel',
-      color: '#a855f7'
-    },
-    {
-      type: 'arrow',
-      startX: 0.2,
-      startY: 0.3,
-      endX: 0.3,
-      endY: 0.4,
-      color: '#f59e0b'
-    }
-  ];
 
   // Assembly steps
   const assemblySteps = [
@@ -82,6 +59,9 @@ export default function CameraApp() {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
+      if (detectionIntervalRef.current) {
+        clearInterval(detectionIntervalRef.current);
+      }
     };
   }, []);
 
@@ -100,7 +80,7 @@ export default function CameraApp() {
     return () => window.removeEventListener('resize', resizeCanvas);
   }, []);
 
-  // Animation loop
+  // Animation loop for drawing
   useEffect(() => {
     const animate = () => {
       drawOverlays();
@@ -114,7 +94,20 @@ export default function CameraApp() {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [overlaysActive]);
+  }, [detections]);
+
+  // Real-time detection loop
+  useEffect(() => {
+    if (isRealtimeActive) {
+      startRealtimeDetection();
+    } else {
+      stopRealtimeDetection();
+    }
+
+    return () => {
+      stopRealtimeDetection();
+    };
+  }, [isRealtimeActive, detectionMode]);
 
   // Initialize camera
   const initCamera = async () => {
@@ -184,11 +177,16 @@ export default function CameraApp() {
   const handleVoiceCommand = (command: string) => {
     updateStatus(`Heard: "${command}"`);
 
-    if (command.includes('start')) {
-      setCurrentStep(1);
-      displayInstruction(assemblySteps[1], 4000);
-      speak(assemblySteps[1]);
-    } 
+    if (command.includes('start') || command.includes('begin')) {
+      setIsRealtimeActive(true);
+      displayInstruction("Real-time detection started", 2000);
+      speak("Starting real-time detection");
+    }
+    else if (command.includes('stop') || command.includes('pause')) {
+      setIsRealtimeActive(false);
+      displayInstruction("Real-time detection stopped", 2000);
+      speak("Stopping real-time detection");
+    }
     else if (command.includes('next')) {
       const nextStep = Math.min(currentStep + 1, assemblySteps.length - 1);
       setCurrentStep(nextStep);
@@ -200,13 +198,8 @@ export default function CameraApp() {
       speak(assemblySteps[currentStep]);
     }
     else if (command.includes('help')) {
-      displayInstruction("Say 'start', 'next', 'repeat', or 'done'", 3000);
-      speak("Available commands: start, next, repeat, or done");
-    }
-    else if (command.includes('done') || command.includes('complete')) {
-      setCurrentStep(assemblySteps.length - 1);
-      displayInstruction(assemblySteps[assemblySteps.length - 1], 4000);
-      speak(assemblySteps[assemblySteps.length - 1]);
+      displayInstruction("Say 'start', 'stop', 'next', or 'repeat'", 3000);
+      speak("Available commands: start, stop, next, or repeat");
     }
     else if (command.includes('manual') || command.includes('upload')) {
       setShowManualPanel(true);
@@ -246,6 +239,52 @@ export default function CameraApp() {
     }
   };
 
+  // Start real-time detection
+  const startRealtimeDetection = () => {
+    // Clear any existing interval
+    if (detectionIntervalRef.current) {
+      clearInterval(detectionIntervalRef.current);
+    }
+
+    // Start new detection loop (adjust interval for performance)
+    // 1000ms = 1 FPS, 500ms = 2 FPS, 333ms = 3 FPS
+    const detectionIntervalMs = 1000; // Start with 1 FPS for stability
+    
+    let lastDetectionTime = Date.now();
+    
+    detectionIntervalRef.current = setInterval(async () => {
+      const now = Date.now();
+      const actualFps = 1000 / (now - lastDetectionTime);
+      setFps(Math.round(actualFps * 10) / 10);
+      lastDetectionTime = now;
+      
+      await sendFrameToBackend();
+    }, detectionIntervalMs);
+
+    updateStatus('Real-time detection active');
+    displayInstruction('Scanning continuously...', 2000);
+  };
+
+  // Stop real-time detection
+  const stopRealtimeDetection = () => {
+    if (detectionIntervalRef.current) {
+      clearInterval(detectionIntervalRef.current);
+      detectionIntervalRef.current = null;
+    }
+    setFps(0);
+    updateStatus('Ready');
+  };
+
+  // Toggle real-time detection
+  const toggleRealtimeDetection = () => {
+    setIsRealtimeActive(!isRealtimeActive);
+    if (!isRealtimeActive) {
+      speak("Starting continuous detection");
+    } else {
+      speak("Stopping continuous detection");
+    }
+  };
+
   // Handle PDF upload
   const handlePDFUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -258,7 +297,7 @@ export default function CameraApp() {
     updateStatus('Processing manual...');
 
     try {
-const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
       if (!backendUrl) {
         throw new Error('Backend URL not configured');
       }
@@ -295,7 +334,9 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
 
   // Send frame to backend (with manual context if available)
   const sendFrameToBackend = async () => {
-    if (!videoRef.current) return;
+    if (!videoRef.current || !videoRef.current.readyState || videoRef.current.readyState < 2) {
+      return;
+    }
 
     const canvas = document.createElement("canvas");
     canvas.width = videoRef.current.videoWidth;
@@ -306,9 +347,7 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
 
     ctx.drawImage(videoRef.current, 0, 0);
 
-    const imageData = canvas.toDataURL("image/jpeg");
-
-    updateStatus('Analyzing...');
+    const imageData = canvas.toDataURL("image/jpeg", 0.8); // Reduce quality for speed
 
     try {
       const endpoint = detectionMode === 'manual' ? '/detect-with-manual' : '/detect';
@@ -324,22 +363,18 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
       if (data.detections) {
         setDetections(data.detections);
         
-        if (data.instruction) {
+        // Only show instruction if not in continuous mode or if it's important
+        if (!isRealtimeActive && data.instruction) {
           displayInstruction(data.instruction, 5000);
           speak(data.instruction);
-        } else if (data.detections.length > 0) {
-          const labels = data.detections.map((d: any) => d.label).join(', ');
-          displayInstruction(`Found: ${labels}`, 3000);
-          speak(`I found ${labels}`);
         }
       }
 
-      updateStatus('Ready');
-
     } catch (error) {
       console.error('Detection error:', error);
-      displayInstruction('Detection failed. Check backend connection.', 2000);
-      updateStatus('Ready');
+      if (!isRealtimeActive) {
+        displayInstruction('Detection failed. Check backend connection.', 2000);
+      }
     }
   };
 
@@ -353,7 +388,16 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
 
   // Draw overlays on canvas
   const drawOverlays = () => {
-    if (!canvasRef.current || detections.length === 0) return;
+    if (!canvasRef.current || detections.length === 0) {
+      // Clear canvas if no detections
+      if (canvasRef.current) {
+        const ctx = canvasRef.current.getContext("2d");
+        if (ctx) {
+          ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
+      }
+      return;
+    }
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
@@ -386,6 +430,13 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
       ctx.font = "bold 18px Arial";
       ctx.fillText(det.label, x + 10, y - 8);
 
+      // Draw confidence if available
+      if (det.confidence) {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+        ctx.font = "12px Arial";
+        ctx.fillText(`${Math.round(det.confidence * 100)}%`, x + 10, y + 20);
+      }
+
       // Draw pulsing circle for important items
       if (det.highlight) {
         const centerX = x + w / 2;
@@ -414,7 +465,6 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
   // Update status
   const updateStatus = (text: string) => {
     setStatusText(text);
-    setTimeout(() => setStatusText('Ready'), 3000);
   };
 
   return (
@@ -518,9 +568,14 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
         <div className="flex justify-between items-center">
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-2 bg-white/10 backdrop-blur-md px-4 py-2 rounded-full">
-              <div className={`w-2 h-2 rounded-full ${isListening ? 'bg-red-500' : 'bg-green-400'} animate-pulse`} />
+              <div className={`w-2 h-2 rounded-full ${isRealtimeActive ? 'bg-red-500' : isListening ? 'bg-yellow-400' : 'bg-green-400'} animate-pulse`} />
               <span className="text-sm font-semibold">{statusText}</span>
             </div>
+            {isRealtimeActive && fps > 0 && (
+              <div className="bg-red-500/30 backdrop-blur-md px-3 py-1.5 rounded-full border border-red-400/50">
+                <span className="text-xs font-semibold">🔴 LIVE • {fps} FPS</span>
+              </div>
+            )}
             {manualUploaded && (
               <div className="bg-purple-500/30 backdrop-blur-md px-3 py-1.5 rounded-full border border-purple-400/50">
                 <span className="text-xs font-semibold">📖 Manual Mode</span>
@@ -542,14 +597,17 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
         {detections.length === 0 ? (
           <div className="text-sm text-white/50 italic">No objects yet</div>
         ) : (
-          detections.map((det, i) => (
+          detections.slice(0, 5).map((det, i) => (
             <div key={i} className="flex justify-between text-sm text-white my-1.5">
-              <span>{det.label}</span>
+              <span className="truncate mr-2">{det.label}</span>
               {det.confidence && (
-                <span className="text-green-400 font-semibold">{Math.round(det.confidence * 100)}%</span>
+                <span className="text-green-400 font-semibold whitespace-nowrap">{Math.round(det.confidence * 100)}%</span>
               )}
             </div>
           ))
+        )}
+        {detections.length > 5 && (
+          <div className="text-xs text-white/50 mt-2">+{detections.length - 5} more</div>
         )}
       </div>
 
@@ -562,17 +620,6 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
         </p>
       </div>
 
-      {/* Test Indicators */}
-      {overlaysActive && (
-        <div className="absolute bottom-48 left-5 right-5 flex flex-wrap gap-2 z-5">
-          {testOverlays.map((overlay, i) => (
-            <div key={i} className="bg-cyan-400/30 border border-cyan-400/60 px-3 py-1.5 rounded-full text-xs font-semibold">
-              {overlay.type}: {overlay.label}
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Bottom Controls */}
       <div className="absolute bottom-0 left-0 right-0 p-8 pb-10 bg-gradient-to-t from-black/90 to-transparent z-10">
         {/* Control Buttons */}
@@ -581,7 +628,7 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
             onClick={toggleVoice}
             className={`flex-1 max-w-[120px] p-4 rounded-2xl border-2 backdrop-blur-md transition-all ${
               isListening 
-                ? 'bg-red-500/50 border-red-500/80' 
+                ? 'bg-yellow-500/50 border-yellow-500/80' 
                 : 'bg-white/10 border-white/20 active:scale-95'
             }`}
           >
@@ -590,40 +637,42 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL + "/upload-manual";
           </button>
 
           <button
-            onClick={sendFrameToBackend}
-            className="flex-1 max-w-[120px] p-4 bg-white/10 backdrop-blur-md border-2 border-white/20 rounded-2xl active:scale-95 transition-all"
+            onClick={toggleRealtimeDetection}
+            className={`flex-1 max-w-[120px] p-4 rounded-2xl border-2 backdrop-blur-md transition-all ${
+              isRealtimeActive 
+                ? 'bg-red-500/50 border-red-500/80 animate-pulse' 
+                : 'bg-white/10 border-white/20 active:scale-95'
+            }`}
           >
-            <div className="text-2xl mb-1.5">📸</div>
-            <div className="text-sm font-semibold">Scan</div>
+            <div className="text-2xl mb-1.5">{isRealtimeActive ? '⏸️' : '▶️'}</div>
+            <div className="text-sm font-semibold">{isRealtimeActive ? 'Stop' : 'Live'}</div>
           </button>
 
           <button
-            onClick={toggleOverlays}
-            className="flex-1 max-w-[120px] p-4 bg-white/10 backdrop-blur-md border-2 border-white/20 rounded-2xl active:scale-95 transition-all"
+            onClick={sendFrameToBackend}
+            disabled={isRealtimeActive}
+            className="flex-1 max-w-[120px] p-4 bg-white/10 backdrop-blur-md border-2 border-white/20 rounded-2xl active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <div className="text-2xl mb-1.5">🎯</div>
-            <div className="text-sm font-semibold">Test</div>
+            <div className="text-2xl mb-1.5">📸</div>
+            <div className="text-sm font-semibold">Scan</div>
           </button>
         </div>
 
         {/* Voice Commands List */}
         <div className="bg-white/5 backdrop-blur-md rounded-xl p-3 text-xs text-white/70">
           <div className="font-bold mb-2 text-purple-400">Voice Commands:</div>
-          <div className="space-y-1">
+          <div className="grid grid-cols-2 gap-1">
             <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;start&quot; - Begin guidance
+              &quot;start&quot; - Begin live
+            </div>
+            <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
+              &quot;stop&quot; - Pause live
             </div>
             <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
               &quot;next&quot; - Next step
             </div>
             <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;manual&quot; - Upload manual
-            </div>
-            <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;repeat&quot; - Repeat instruction
-            </div>
-            <div className="pl-3 relative before:content-['•'] before:absolute before:left-0 before:text-cyan-400">
-              &quot;done&quot; - Mark complete
+              &quot;manual&quot; - Upload PDF
             </div>
           </div>
         </div>

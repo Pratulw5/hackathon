@@ -49,3 +49,5 @@ env/
 __pycache__/
 *.py[cod]
 *$py.class
+# Ignore dataset
+dataset/
