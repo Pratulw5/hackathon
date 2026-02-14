@@ -26,7 +26,6 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000", 
         "https://ai-vision-guide.vercel.app",
-        "*"  # For development - restrict in production
     ],
     allow_credentials=True,
     allow_methods=["*"],
