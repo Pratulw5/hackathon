@@ -162,49 +162,117 @@ Sophiie senior engineers and CTO. Judging will take place over a 2-week period f
 
 | Field | Your Answer |
 |-------|-------------|
-| **Name** | |
-| **University / Employer** | |
+| **Name** |Pratul Wadhwa |
+| **University / Employer** | University Of Queensland / Distrosub|
 
 ### Project
 
 | Field | Your Answer |
 |-------|-------------|
-| **Project Name** | |
-| **One-Line Description** | |
-| **Demo Video Link** | |
-| **Tech Stack** | |
-| **AI Provider(s) Used** | |
+| **Project Name** | Vision Guide - AI Assembly Assistant |
+| **One-Line Description** | Real-time AR voice assistant that guides users through product assembly using computer vision, manual parsing, and voice interaction |
+| **Demo Video Link** | https://www.awesomescreenshot.com/video/49458079?key=3dea16d84bc3b8cc25ac7a260c7d4d7e |
+| **Tech Stack** | Next.js, FastAPI, YOLOv8, Claude Sonnet 4.5, Faster-Whisper, gTTS, Tailwind CSS, OpenCV |
+| **AI Provider(s) Used** | Anthropic (Claude Sonnet 4.5 for manual parsing & voice Q&A), Whisper (speech-to-text), gTTS/edge-tts (text-to-speech) |
 
 ### About Your Project
 
 #### What does it do?
 
-<!-- 2-3 paragraphs explaining your agent, the problem it solves, and why the interaction matters -->
+Vision Guide transforms traditional PDF manuals into an interactive AR-powered voice assistant. Users upload their assembly manual, and the AI instantly parses it to extract parts lists and step-by-step instructions. The app then activates a live camera feed with real-time object detection, using YOLOv8 to identify components in the user's workspace.
+
+As users assemble their product, they can speak naturally to ask questions like "where is the charging port?" or "what's the next step?" The AI assistant responds with voice guidance while highlighting relevant objects on screen with AR overlays. The system understands the manual's context, tracks progress through steps, and provides encouragement along the way.
+
+The tutorial mode walks users through each step sequentially, detecting required parts and confirming completion before moving forward. This hands-free, eyes-on-the-work approach makes complex assembly tasks accessible to everyone, from IKEA furniture to laptop repairs.
 
 #### How does the interaction work?
 
-<!-- Describe the user experience — what does a user see, hear, or do when using your agent? -->
+When users first open the app, they're greeted with a camera view and prompted to upload their PDF manual. The AI immediately processes the document, extracting all parts and instructions using Claude's vision capabilities. Once processed, voice recognition activates automatically.
+
+Users simply speak commands like "start tutorial" to begin guided assembly. The camera continuously scans their workspace, drawing colored boxes around detected objects. When the AI speaks instructions, voice recognition pauses automatically to avoid picking up its own voice, then resumes listening seamlessly.
+
+The interface shows real-time detection results, current step progress, and visual overlays highlighting required components. Users can ask questions at any time ("which screw do I need?"), mark steps complete, or jump to specific instructions. Everything is hands-free - no need to touch the screen with dirty or busy hands during assembly.
 
 #### What makes it special?
 
-<!-- What are you most proud of? What would you want the judges to notice? -->
+**Smart Context Awareness**: Unlike generic voice assistants, Vision Guide understands the specific manual you're working with. It knows every part, every step, and can see what's in front of you through real-time object detection.
+
+**Seamless Voice Control**: The speech recognition intelligently pauses during AI responses to prevent echo, then auto-resumes - creating a natural conversation flow that feels like having an expert guide standing next to you.
+
+**Progressive Assembly Tracking**: The system doesn't just read instructions - it actively tracks which parts you need for each step, highlights them in your camera view, and confirms completion before advancing. This reduces errors and confusion.
+
+**100% Free Open-Source Stack**: Built entirely with free tools (Faster-Whisper for STT, gTTS for TTS, Claude API, YOLOv8), making professional AR assembly assistance accessible to everyone without expensive APIs or hardware requirements.
+
+**Real Production Value**: This isn't a prototype - it's a polished, deployable application with error handling, multiple fallbacks for each service, proper audio conversion, and a beautiful UI that works on mobile and desktop.
 
 #### How to run it
-
-<!-- Step-by-step instructions to set up and run your project locally -->
-
 ```bash
-# Example:
-# git clone <your-repo>
-# cd <your-project>
-# npm install
-# cp .env.example .env  # add your API keys
-# npm start
+# 1. Clone the repository
+git clone https://github.com/yourusername/vision-guide
+cd vision-guide
+
+# 2. Install frontend dependencies
+cd frontend
+npm install
+
+# 3. Set up frontend environment
+cp .env.example .env.local
+# Add your backend URL:
+NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
+
+# 4. Install backend dependencies
+cd ../backend
+pip install -r requirements.txt
+
+# Required packages:
+pip install fastapi uvicorn ultralytics opencv-python PyPDF2 pdf2image
+pip install python-dotenv gtts faster-whisper pydub
+
+# 5. Set up backend environment
+cp .env.example .env
+# Add your API keys:
+GEMINI_API_KEY=your_gemini_key_here
+# (Optional: SUPABASE_URL, SUPABASE_KEY for persistence)
+
+# 6. Install ffmpeg (required for audio conversion)
+# Windows: Download from https://ffmpeg.org/download.html
+# macOS: brew install ffmpeg
+# Linux: sudo apt install ffmpeg
+
+# 7. Start the backend
+python main.py
+# Backend runs on http://localhost:8000
+
+# 8. Start the frontend (new terminal)
+cd ../frontend
+npm run dev
+# Frontend runs on http://localhost:3000
+
+# 9. Grant permissions
+# Allow camera and microphone access when prompted by browser
+
+# 10. Upload a manual and start assembling!
 ```
+
+**Quick test**: Visit http://localhost:3000, upload any PDF manual, click "ACTIVATE" voice button, and say "start tutorial"
 
 #### Architecture / Technical Notes
 
-<!-- Optional: describe your architecture, key technical decisions, or interesting implementation details -->
+**Frontend Architecture**: Built with Next.js 14 App Router using TypeScript and Tailwind CSS. Uses MediaRecorder API to capture 3-second audio chunks, automatically sending them to the backend STT endpoint. Implements proper state management with useRef for voice recognition lifecycle, preventing double-start errors and handling auto-restart after AI speech.
+
+**Backend Architecture**: FastAPI server with four main pipelines:
+1. **Manual Processing**: PyPDF2 extracts text → Claude Sonnet 4.5 parses into structured JSON → Optional Supabase persistence
+2. **Object Detection**: YOLOv8s runs on each frame → Filters detections based on current step's required objects → Returns with AR overlay coordinates
+3. **Speech-to-Text**: WebM audio → pydub converts to WAV → Faster-Whisper transcribes → Returns text command
+4. **Voice Assistant**: Question + manual context + live detections → Claude generates response → gTTS converts to speech
+
+**Key Technical Decisions**:
+- **Audio Format Handling**: Implemented WebM-to-WAV conversion because Faster-Whisper can't parse Opus codec directly. Used pydub + ffmpeg pipeline.
+- **Voice Loop Management**: STT endpoint stops voice recognition before playing audio, resumes after playback using audio.onended callback. Prevents AI from hearing itself.
+- **Context-Aware Detection**: Instead of showing all detected objects, filters based on manual's current step requirements using fuzzy matching on part keywords.
+- **Stateless with Memory**: Backend stores manual context in-memory for speed, with optional Supabase persistence for production deployment.
+
+**Interesting Implementation**: The tutorial mode uses refs (manualUploadedRef, stepsRef) to avoid React closure issues in voice recognition callbacks, ensuring the latest state is always accessible even though recognition runs continuously.
 
 ---
 
@@ -217,7 +285,6 @@ By participating, you agree to:
 - Submit only your own original work created during the hackathon
 - Not interfere with other participants' work
 - Follow the rules outlined in this document
-
 ---
 
 ## Communication & Support
