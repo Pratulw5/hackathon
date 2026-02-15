@@ -207,56 +207,6 @@ By integrating manual understanding, real-time object detection, contextual reas
 
 **Real Production Value**: This isn't a prototype - it's a polished, deployable application with error handling, multiple fallbacks for each service, proper audio conversion, and a beautiful UI that works on mobile and desktop.
 
-#### How to run it
-```bash
-# 1. Clone the repository
-git clone https://github.com/yourusername/vision-guide
-cd vision-guide
-
-# 2. Install frontend dependencies
-cd frontend
-npm install
-
-# 3. Set up frontend environment
-cp .env.example .env.local
-# Add your backend URL:
-NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
-
-# 4. Install backend dependencies
-cd ../backend
-pip install -r requirements.txt
-
-# Required packages:
-pip install fastapi uvicorn ultralytics opencv-python PyPDF2 pdf2image
-pip install python-dotenv gtts faster-whisper pydub
-
-# 5. Set up backend environment
-cp .env.example .env
-# Add your API keys:
-GEMINI_API_KEY=your_gemini_key_here
-# (Optional: SUPABASE_URL, SUPABASE_KEY for persistence)
-
-# 6. Install ffmpeg (required for audio conversion)
-# Windows: Download from https://ffmpeg.org/download.html
-# macOS: brew install ffmpeg
-# Linux: sudo apt install ffmpeg
-
-# 7. Start the backend
-python main.py
-# Backend runs on http://localhost:8000
-
-# 8. Start the frontend (new terminal)
-cd ../frontend
-npm run dev
-# Frontend runs on http://localhost:3000
-
-# 9. Grant permissions
-# Allow camera and microphone access when prompted by browser
-
-# 10. Upload a manual and start assembling!
-```
-
-**Quick test**: Visit http://localhost:3000, upload any PDF manual, click "ACTIVATE" voice button, and say "start tutorial"
 
 #### Architecture / Technical Notes
 
