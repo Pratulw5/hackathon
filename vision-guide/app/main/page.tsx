@@ -11,6 +11,8 @@ export default function CameraApp() {
   const animationFrameRef = useRef<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
+const manualUploadedRef = useRef(false);
+const stepsRef = useRef<any[]>([]);
 
   // State
   const [isLoading, setIsLoading] = useState(true);
@@ -31,6 +33,11 @@ export default function CameraApp() {
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
   const [showStepCard, setShowStepCard] = useState(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
+  
+  // Debug: Log when steps change
+  useEffect(() => {
+    console.log('Steps updated:', steps.length, steps);
+  }, [steps]); const [isVoiceActive, setIsVoiceActive] = useState(false);
 
   useEffect(() => {
     drawOverlays();
@@ -109,13 +116,33 @@ export default function CameraApp() {
 
       setIsLoading(false);
       setPermissionDenied(false);
+      
+      // Auto-start voice recognition
+      setTimeout(() => {
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+            console.log('Voice recognition started');
+            updateStatus('Listening...');
+            speak('Voice assistant ready. Upload a manual to begin.');
+          } catch (e) {
+            console.log('Voice start error:', e);
+          }
+        }
+      }, 1000);
     } catch (err) {
       console.error('Camera error:', err);
       setIsLoading(false);
       setPermissionDenied(true);
     }
   };
+useEffect(() => {
+  manualUploadedRef.current = manualUploaded;
+}, [manualUploaded]);
 
+useEffect(() => {
+  stepsRef.current = steps;
+}, [steps]);
   const setupVoiceRecognition = () => {
     if (typeof window !== 'undefined') {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -130,6 +157,7 @@ export default function CameraApp() {
           const last = event.results.length - 1;
           const command = event.results[last][0].transcript.toLowerCase().trim();
           console.log('Voice command:', command);
+          setIsVoiceActive(true); // Show active state
           handleVoiceCommand(command);
         };
 
@@ -138,16 +166,19 @@ export default function CameraApp() {
         };
 
         recognition.onend = () => {
-          // Auto-restart recognition
-          if (recognitionRef.current && manualUploaded) {
-            setTimeout(() => {
-              try {
+          // Always auto-restart recognition
+          setTimeout(() => {
+            try {
+              if (recognitionRef.current && manualUploaded) {
                 recognitionRef.current.start();
-              } catch (e) {
-                console.log('Recognition restart failed:', e);
+                setIsVoiceActive(true);
+                console.log('Voice recognition restarted');
               }
-            }, 100);
-          }
+            } catch (e) {
+              console.log('Voice restart failed:', e);
+              setIsVoiceActive(false);
+            }
+          }, 100);
         };
 
         recognitionRef.current = recognition;
@@ -173,8 +204,13 @@ export default function CameraApp() {
   };
 
   const startTutorial = () => {
-    if (steps.length === 0) {
+    console.log(`Starting tutorial - manualUploaded: ${manualUploaded}, steps.length: ${steps.length}`);
+    console.log('Steps:', steps);
+    
+    if (!manualUploadedRef.current || stepsRef.current.length === 0)
+ {
       speak("Please upload a manual first to start the tutorial.");
+      displayInstruction("Upload a manual to begin", 3000);
       return;
     }
 
@@ -183,7 +219,8 @@ export default function CameraApp() {
     setCompletedSteps([]);
     setShowStepCard(true);
     
-    const firstStep = steps[0];
+    const firstStep = stepsRef.current[0];
+
     speak(`Starting tutorial! Step 1: ${firstStep.instruction}`);
     displayInstruction(`Step 1: ${firstStep.instruction}`, 8000);
   };
@@ -217,9 +254,46 @@ export default function CameraApp() {
     }, 2000);
   };
 
-  const speak = (text: string) => {
+  const speak = async (text: string) => {
+  try {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsVoiceActive(false);
+    }
+
+    const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+
+    if (response.ok) {
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+
+        if (recognitionRef.current && manualUploadedRef.current) {
+          recognitionRef.current.start();
+          setIsVoiceActive(true);
+        }
+      };
+
+      audio.play();
+    } else {
+      fallbackSpeak(text);
+    }
+  } catch {
+    fallbackSpeak(text);
+  }
+};
+
+
+  const fallbackSpeak = (text: string) => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      speechSynthesis.cancel(); // Cancel any ongoing speech
+      speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 0.9;
       utterance.pitch = 1.0;
@@ -272,15 +346,26 @@ export default function CameraApp() {
       
       if (data.success) {
         setManualUploaded(true);
-        setSteps(data.steps || []);
+        const uploadedSteps = data.steps || [];
+        setSteps(uploadedSteps);
         setShowManualPanel(false);
+        
+        console.log(`Manual uploaded with ${uploadedSteps.length} steps:`, uploadedSteps);
         
         speak(`Manual uploaded successfully. Found ${data.parts_count} parts and ${data.steps_count} steps. I'm ready to help! Say "start tutorial" to begin step-by-step guidance.`);
         displayInstruction('Manual loaded! Say "Start tutorial" or ask me anything', 5000);
         
         // Start voice recognition now
         if (recognitionRef.current) {
-          recognitionRef.current.start();
+          try {
+            recognitionRef.current.start();
+            setIsVoiceActive(true);
+            console.log('Voice recognition started');
+            updateStatus('Live & Listening');
+          } catch (e) {
+            console.error('Failed to start voice recognition:', e);
+            setIsVoiceActive(false);
+          }
         }
       } else {
         throw new Error(data.error || 'Failed to process manual');
@@ -642,16 +727,52 @@ export default function CameraApp() {
       </div>
 
       {/* Voice Indicator */}
-      {manualUploaded && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10">
-          <div className="bg-black/80 backdrop-blur-xl rounded-full px-6 py-3 border border-cyan-400/30 flex items-center gap-3">
-            <div className="w-3 h-3 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-sm font-semibold text-white">
-              🎤 Speak to ask questions
-            </span>
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10">
+        <div className={`backdrop-blur-xl rounded-full px-6 py-4 border-2 flex items-center gap-3 transition-all shadow-lg ${
+          isVoiceActive 
+            ? 'bg-green-500/20 border-green-400/60 shadow-green-400/30' 
+            : 'bg-black/90 border-cyan-400/30'
+        }`}>
+          <div className="relative flex items-center justify-center">
+            {isVoiceActive && (
+              <>
+                <div className="absolute w-6 h-6 rounded-full bg-green-400/30 animate-ping" />
+                <div className="absolute w-5 h-5 rounded-full bg-green-400/50 animate-pulse" />
+              </>
+            )}
+            <div className={`w-3 h-3 rounded-full z-10 ${isVoiceActive ? 'bg-green-400' : 'bg-gray-400'}`} />
           </div>
+          <div className="flex flex-col">
+            <span className="text-sm font-bold text-white">
+              {isVoiceActive ? '🎤 Listening...' : '🎤 Voice Inactive'}
+            </span>
+            {isVoiceActive && (
+              <span className="text-xs text-green-300">
+                Speak to ask questions
+              </span>
+            )}
+          </div>
+          {!isVoiceActive && manualUploaded && (
+            <button
+              onClick={() => {
+                if (recognitionRef.current) {
+                  try {
+                    recognitionRef.current.start();
+                    setIsVoiceActive(true);
+                    speak('Voice assistant activated');
+                  } catch (e) {
+                    console.log('Voice start error:', e);
+                    setIsVoiceActive(false);
+                  }
+                }
+              }}
+              className="ml-2 px-4 py-1.5 bg-gradient-to-r from-green-500 to-emerald-500 rounded-full text-xs font-bold hover:scale-105 transition-transform"
+            >
+              ACTIVATE
+            </button>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
