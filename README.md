@@ -172,8 +172,8 @@ Sophiie senior engineers and CTO. Judging will take place over a 2-week period f
 | **Project Name** | Vision Guide - AI Assembly Assistant |
 | **One-Line Description** | Real-time AR voice assistant that guides users through product assembly using computer vision, manual parsing, and voice interaction |
 | **Demo Video Link** | https://www.awesomescreenshot.com/video/49458079?key=3dea16d84bc3b8cc25ac7a260c7d4d7e |
-| **Tech Stack** | Next.js, FastAPI, YOLOv8, Claude Sonnet 4.5, Faster-Whisper, gTTS, Tailwind CSS, OpenCV |
-| **AI Provider(s) Used** | Anthropic (Claude Sonnet 4.5 for manual parsing & voice Q&A), Whisper (speech-to-text), gTTS/edge-tts (text-to-speech) |
+| **Tech Stack** | Next.js, Tailwind CSS, FastAPI, Ultralytics YOLOv8 (custom .pt model), OpenCV, Gemini Flash (Google Generative AI), Supabase, ElevenLabs (TTS), gTTS / edge-tts (fallback), PyPDF2, pdf2image |
+| **AI Provider(s) Used** | Google Gemini (LLM for manual parsing & assistant), Ultralytics YOLOv8 (custom-trained object detection), ElevenLabs (Text-to-Speech), gTTS / edge-tts (TTS fallback) |
 
 ### About Your Project
 
@@ -187,11 +187,13 @@ The tutorial mode walks users through each step sequentially, detecting required
 
 #### How does the interaction work?
 
-When users first open the app, they're greeted with a camera view and prompted to upload their PDF manual. The AI immediately processes the document, extracting all parts and instructions using Claude's vision capabilities. Once processed, voice recognition activates automatically.
+The AI Vision Guide is an intelligent, hands-free assembly assistant that combines computer vision, large language models, and voice interaction to guide users through product assembly in real time. When a user uploads a PDF manual, the system extracts the full text and images from the document and uses an LLM to automatically structure the content into a parts list and step-by-step instructions. The manual data is stored for future access while key information—such as parts, steps, and current progress—is cached for real-time interaction.
 
-Users simply speak commands like "start tutorial" to begin guided assembly. The camera continuously scans their workspace, drawing colored boxes around detected objects. When the AI speaks instructions, voice recognition pauses automatically to avoid picking up its own voice, then resumes listening seamlessly.
+The system uses a custom-trained YOLO `.pt` model that has been pretrained specifically on the parts referenced in the manual, enabling accurate detection of components such as screws, panels, and brackets through the live camera feed. As the user assembles the product, the camera continuously scans the workspace and the model detects visible parts, drawing bounding boxes and highlighting only the components relevant to the current step. Irrelevant objects are dimmed, helping users focus on exactly what is required.
 
-The interface shows real-time detection results, current step progress, and visual overlays highlighting required components. Users can ask questions at any time ("which screw do I need?"), mark steps complete, or jump to specific instructions. Everything is hands-free - no need to touch the screen with dirty or busy hands during assembly.
+Voice interaction makes the entire experience hands-free. Users can issue commands like “start tutorial,” “next step,” or “which screw do I need?” The assistant processes these queries by combining manual context, current step information, and live detected objects from the camera. It then generates a concise spoken response, highlights necessary components on screen, and provides short overlay instructions when needed. While the AI is speaking, voice recognition automatically pauses to prevent feedback and resumes seamlessly afterward.
+
+By integrating manual understanding, real-time object detection, contextual reasoning, and speech interaction, the system transforms static PDF instructions into an interactive and intelligent assembly experience. Users receive step-aware visual guidance, conversational support, and real-time part recognition, making the assembly process faster, clearer, and completely hands-free.
 
 #### What makes it special?
 
