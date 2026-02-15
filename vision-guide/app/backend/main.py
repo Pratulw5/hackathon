@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from ultralytics import YOLO
 import cv2
@@ -16,6 +17,9 @@ from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import time
 from typing import Optional, List
+from supabase import create_client, Client
+import hashlib
+from datetime import datetime
 
 load_dotenv()
 
@@ -43,10 +47,29 @@ HF_API_KEY = os.getenv("HF_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"
 
-# Global state
+# TTS Configuration
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+USE_ELEVENLABS = bool(ELEVENLABS_API_KEY)
+
+# Supabase Configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+supabase: Optional[Client] = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✓ Supabase connected")
+    except Exception as e:
+        print(f"✗ Supabase connection failed: {e}")
+else:
+    print("ℹ Supabase not configured (will use in-memory storage)")
+
+# Global state (in-memory cache)
 manual_context = {
+    "manual_id": None,  # Current manual ID from Supabase
     "text": "",
-    "full_manual_text": "",  # Complete manual for LLM
+    "full_manual_text": "",
     "parts_list": [],
     "steps": [],
     "current_step": 0,
@@ -59,8 +82,99 @@ detection_stats = {
     "last_detection_time": 0
 }
 
+# Supabase Helper Functions
+def generate_manual_hash(text: str) -> str:
+    """Generate unique hash for manual text"""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+async def save_manual_to_supabase(filename: str, text: str, parts: List[dict], steps: List[dict]) -> Optional[str]:
+    """Save manual data to Supabase, returns manual_id"""
+    if not supabase:
+        print("Supabase not configured, skipping save")
+        return None
+    
+    try:
+        # Generate unique hash to avoid duplicates
+        text_hash = generate_manual_hash(text)
+        
+        # Check if manual already exists
+        existing = supabase.table("manuals").select("id").eq("text_hash", text_hash).execute()
+        
+        if existing.data and len(existing.data) > 0:
+            manual_id = existing.data[0]["id"]
+            print(f"Manual already exists with ID: {manual_id}")
+            return manual_id
+        
+        # Insert new manual
+        manual_data = {
+            "filename": filename,
+            "text_hash": text_hash,
+            "full_text": text,
+            "parts": json.dumps(parts),
+            "steps": json.dumps(steps),
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        result = supabase.table("manuals").insert(manual_data).execute()
+        
+        if result.data and len(result.data) > 0:
+            manual_id = result.data[0]["id"]
+            print(f"✓ Manual saved to Supabase with ID: {manual_id}")
+            return manual_id
+        
+    except Exception as e:
+        print(f"Error saving to Supabase: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return None
+
+async def load_manual_from_supabase(manual_id: str) -> Optional[dict]:
+    """Load manual data from Supabase by ID"""
+    if not supabase:
+        print("Supabase not configured")
+        return None
+    
+    try:
+        result = supabase.table("manuals").select("*").eq("id", manual_id).execute()
+        
+        if result.data and len(result.data) > 0:
+            manual = result.data[0]
+            print(f"✓ Manual loaded from Supabase: {manual.get('filename')}")
+            
+            return {
+                "id": manual["id"],
+                "filename": manual["filename"],
+                "full_text": manual["full_text"],
+                "parts": json.loads(manual["parts"]) if isinstance(manual["parts"], str) else manual["parts"],
+                "steps": json.loads(manual["steps"]) if isinstance(manual["steps"], str) else manual["steps"]
+            }
+    except Exception as e:
+        print(f"Error loading from Supabase: {e}")
+    
+    return None
+
+async def list_manuals_from_supabase() -> List[dict]:
+    """List all manuals from Supabase"""
+    if not supabase:
+        return []
+    
+    try:
+        result = supabase.table("manuals").select("id, filename, created_at").order("created_at", desc=True).limit(50).execute()
+        
+        if result.data:
+            return result.data
+    except Exception as e:
+        print(f"Error listing manuals: {e}")
+    
+    return []
+
 class ImageData(BaseModel):
     image: str
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: Optional[str] = "en-US-Neural2-F"  # Default female voice
 
 class AssistantQuery(BaseModel):
     question: str
@@ -68,6 +182,90 @@ class AssistantQuery(BaseModel):
     detections: List[dict] = []
     frame: Optional[str] = None
     conversation_history: List[str] = []
+
+@app.post("/tts")
+async def text_to_speech(request: TTSRequest):
+    """
+    Convert text to speech using Google Cloud TTS or ElevenLabs
+    Falls back to edge-tts (free) if no API keys configured
+    """
+    
+    # Try ElevenLabs first (highest quality)
+    if USE_ELEVENLABS:
+        try:
+            response = requests.post(
+                "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",  # Rachel voice
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "text": request.text,
+                    "model_id": "eleven_monolingual_v1",
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.75
+                    }
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                return StreamingResponse(
+                    BytesIO(response.content),
+                    media_type="audio/mpeg"
+                )
+        except Exception as e:
+            print(f"ElevenLabs TTS error: {e}")
+    
+    # Fallback to Google Cloud TTS via public API
+    try:
+        import gtts
+        tts = gtts.gTTS(text=request.text, lang='en', slow=False)
+        audio_buffer = BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
+        
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/mpeg"
+        )
+    except ImportError:
+        print("gTTS not installed, trying edge-tts...")
+    except Exception as e:
+        print(f"gTTS error: {e}")
+    
+    # Fallback to edge-tts (Microsoft Edge TTS - free and good quality)
+    try:
+        import edge_tts
+        import asyncio
+        
+        audio_buffer = BytesIO()
+        
+        async def generate_audio():
+            communicate = edge_tts.Communicate(
+                request.text, 
+                "en-US-AriaNeural"  # Natural female voice
+            )
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_buffer.write(chunk["data"])
+        
+        asyncio.run(generate_audio())
+        audio_buffer.seek(0)
+        
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/mpeg"
+        )
+    except ImportError:
+        print("edge-tts not installed. Install with: pip install edge-tts")
+    except Exception as e:
+        print(f"edge-tts error: {e}")
+    
+    # If all else fails, return error
+    return {"error": "TTS not configured. Install: pip install gtts or pip install edge-tts"}
+
 
 @app.post("/detect")
 def detect(data: ImageData):
@@ -463,7 +661,7 @@ def parse_manual_basic(text):
 
 @app.post("/upload-manual")
 async def upload_manual(file: UploadFile = File(...)):
-    """Upload and process manual"""
+    """Upload and process manual, save to Supabase"""
     try:
         print(f"\n{'='*60}")
         print(f"Processing: {file.filename}")
@@ -482,7 +680,11 @@ async def upload_manual(file: UploadFile = File(...)):
         print("Parsing with AI...")
         parts_list, steps = parse_manual_with_gemini(text)
         
-        # Store full text for LLM
+        # Save to Supabase
+        manual_id = await save_manual_to_supabase(file.filename, text, parts_list, steps)
+        
+        # Store in memory cache
+        manual_context["manual_id"] = manual_id
         manual_context["text"] = text[:1000]
         manual_context["full_manual_text"] = text
         manual_context["parts_list"] = parts_list
@@ -492,13 +694,16 @@ async def upload_manual(file: UploadFile = File(...)):
         
         print(f"\n{'='*60}")
         print(f"✓ Success!")
+        print(f"  Manual ID: {manual_id}")
         print(f"  Parts: {len(parts_list)}")
         print(f"  Steps: {len(steps)}")
         print(f"  Text: {len(text)} chars")
+        print(f"  Storage: {'Supabase' if manual_id else 'Memory only'}")
         print(f"{'='*60}\n")
         
         return {
             "success": True,
+            "manual_id": manual_id,
             "content": f"{len(parts_list)} parts, {len(steps)} steps",
             "parts_count": len(parts_list),
             "steps_count": len(steps),
@@ -525,7 +730,8 @@ def health_check():
         "status": "healthy",
         "yolo_loaded": yolo_model is not None,
         "llm_ready": bool(GEMINI_API_KEY),
-        "manual_loaded": bool(manual_context.get("full_manual_text"))
+        "manual_loaded": bool(manual_context.get("full_manual_text")),
+        "supabase_connected": supabase is not None
     }
 
 @app.get("/stats")
@@ -534,7 +740,59 @@ def get_stats():
         "total_detections": detection_stats["total_requests"],
         "avg_response_time_ms": int(detection_stats["avg_response_time"] * 1000),
         "manual_loaded": bool(manual_context.get("full_manual_text")),
-        "steps_count": len(manual_context.get("steps", []))
+        "steps_count": len(manual_context.get("steps", [])),
+        "manual_id": manual_context.get("manual_id")
+    }
+
+@app.get("/manuals")
+async def get_manuals():
+    """List all uploaded manuals from Supabase"""
+    if not supabase:
+        return {
+            "success": False,
+            "error": "Supabase not configured",
+            "manuals": []
+        }
+    
+    manuals = await list_manuals_from_supabase()
+    return {
+        "success": True,
+        "manuals": manuals
+    }
+
+@app.post("/load-manual/{manual_id}")
+async def load_manual(manual_id: str):
+    """Load a previously uploaded manual from Supabase"""
+    if not supabase:
+        return {
+            "success": False,
+            "error": "Supabase not configured"
+        }
+    
+    manual_data = await load_manual_from_supabase(manual_id)
+    
+    if not manual_data:
+        return {
+            "success": False,
+            "error": "Manual not found"
+        }
+    
+    # Load into memory cache
+    manual_context["manual_id"] = manual_data["id"]
+    manual_context["text"] = manual_data["full_text"][:1000]
+    manual_context["full_manual_text"] = manual_data["full_text"]
+    manual_context["parts_list"] = manual_data["parts"]
+    manual_context["steps"] = manual_data["steps"]
+    manual_context["current_step"] = 0
+    
+    return {
+        "success": True,
+        "manual_id": manual_data["id"],
+        "filename": manual_data["filename"],
+        "parts_count": len(manual_data["parts"]),
+        "steps_count": len(manual_data["steps"]),
+        "parts": manual_data["parts"][:10],
+        "steps": manual_data["steps"]
     }
 
 if __name__ == "__main__":
@@ -548,10 +806,28 @@ if __name__ == "__main__":
     print("  ✓ Real-time YOLO detection")
     print(f"  {'✓' if GEMINI_API_KEY else '✗'} Voice Q&A with LLM")
     print(f"  {'✓' if GEMINI_API_KEY else '✗'} Tutorial mode")
+    print("\nStorage:")
+    if supabase:
+        print("  ✓ Supabase connected - manuals persist across sessions")
+    else:
+        print("  ℹ Using memory storage - manuals reset on restart")
+        print("  ℹ To enable: Set SUPABASE_URL and SUPABASE_KEY")
+    print("\nTTS Configuration:")
+    if USE_ELEVENLABS:
+        print("  ✓ ElevenLabs TTS (Premium)")
+    else:
+        print("  ℹ Using free TTS (gtts/edge-tts)")
+        print("  ℹ For better voice: export ELEVENLABS_API_KEY='your_key'")
     print("\nEndpoints:")
+    print("  • POST /upload-manual - Upload PDF (saves to Supabase)")
+    print("  • GET /manuals - List all manuals")
+    print("  • POST /load-manual/{id} - Load manual by ID")
     print("  • POST /detect-with-manual - Live detection")
     print("  • POST /ask-assistant - Voice Q&A")
-    print("  • POST /upload-manual - Upload PDF")
+    print("  • POST /tts - Text-to-speech")
+    print("\nRequired:")
+    print("  pip install supabase  (for persistent storage)")
+    print("  pip install gtts  OR  pip install edge-tts  (for TTS)")
     print("="*60 + "\n")
     
     uvicorn.run(app, host="0.0.0.0", port=port)
